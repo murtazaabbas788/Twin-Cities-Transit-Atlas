@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Twin Cities Transit Atlas | Islamabad and Rawalpindi</title>
+<meta name="description" content="Interactive Web GIS map of bus stops, Metrobus stations, terminals, railway stations and taxi stands in Islamabad and Rawalpindi, built on live OpenStreetMap data.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="closed">
+<header id="top">
+  <button id="menu" aria-label="Show or hide the filter panel" aria-expanded="false"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <div class="brand">
+    <span class="logo" id="logo"></span>
+    <div><b>Twin Cities Transit Atlas</b><small>Islamabad and Rawalpindi</small></div>
+  </div>
+  <div class="search">
+    <svg class="mag" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+    <input id="q" type="text" role="combobox" aria-expanded="false" aria-controls="sug" aria-autocomplete="list" placeholder="Search a stop or station, e.g. Faizabad" autocomplete="off" spellcheck="false">
+    <button id="near" type="button">Near me</button>
+    <ul id="sug" role="listbox" hidden></ul>
+  </div>
+  <div class="clock" aria-label="Current date and time in Pakistan"><b id="time">--:--:--</b><small id="date"></small></div>
+</header>
+
+<main>
+  <aside id="panel">
+    <div class="inner">
+      <div class="intro"><div class="kpis"><div><b id="k-total">0</b>stops</div><div><b id="k-isb">0</b>Islamabad</div><div><b id="k-rwp">0</b>Rawalpindi</div></div></div>
+      <div class="body">
+        <details class="sec" open><summary>Area</summary><div id="cities"></div></details>
+        <details class="sec" open><summary>Stop types</summary><div id="cats"></div></details>
+        <details class="sec" open><summary>Bus routes</summary>
+          <label class="opt"><input type="checkbox" id="r-metro"><span class="box" style="--c:#0b1f3a"></span><span class="lbl">Metrobus line</span><em>quick</em></label>
+          <label class="opt"><input type="checkbox" id="r-all"><span class="box" style="--c:#0b1f3a"></span><span class="lbl">All bus routes</span><em>slower</em></label>
+        </details>
+        <details class="sec" open><summary>Basemap</summary>
+          <div class="seg" id="base"><button data-b="osm" class="on">Streets</button><button data-b="sat">Satellite</button><button data-b="topo">Terrain</button></div>
+        </details>
+        <div class="about">
+          <p><b>Study area:</b> Islamabad and Rawalpindi, Pakistan. <b>Data:</b> OpenStreetMap, fetched live from the Overpass API.</p>
+          <details><summary>Sources and attribution</summary>
+            <p>Bounding box 33.45–33.80°N, 72.80–73.25°E. The city split is approximate and uses the mapped address when available.</p>
+            <p>The map shows what volunteers have mapped, not an official timetable. <span id="src"></span></p>
+            <p>Road distances: <a href="https://project-osrm.org" target="_blank" rel="noopener">OSRM</a> public demo server. Overpass: <a href="https://wiki.openstreetmap.org/wiki/Overpass_API" target="_blank" rel="noopener">free public instances</a>.</p>
+            <p>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a> (ODbL). Satellite © Esri, terrain © OpenTopoMap. Built with <a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a>.</p>
+          </details>
+        </div>
+      </div>
+    </div>
+    <button id="edge" aria-label="Show or hide the filter panel"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+  </aside>
+
+  <div class="mapwrap">
+    <div id="map" aria-label="Map of public transport in Islamabad and Rawalpindi"></div>
+    <aside id="info" hidden aria-live="polite"></aside>
+    <div id="legend"></div>
+  </div>
+</main>
+
+<footer id="foot">
+  <span class="cr"><a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a> | © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors<span id="credit-extra"></span></span>
+  <span class="by">@SheikhMurtazabinAbbas</span>
+  <span id="coords" aria-hidden="true"></span>
+</footer>
+
+<div id="pill" hidden><div class="spin"></div><span></span></div>
+<div id="loader" role="status"><div class="spin big"></div><p id="loader-msg">Loading transport data from OpenStreetMap…</p></div>
+<div id="toast" role="alert" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
