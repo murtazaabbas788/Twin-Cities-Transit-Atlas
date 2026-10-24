@@ -2,7 +2,7 @@
 const CACHE_KEY = 'tcta-stops-v2';
 const BBOX = '33.45,72.80,33.80,73.25';
 /* Free public Overpass instances (no key needed). All are queried at once and the first answer wins. */
-const ENDPOINTS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', 'https://overpass.openstreetmap.fr/api/interpreter'];
+const ENDPOINTS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', 'https://overpass.openstreetmap.fr/api/interpreter', 'https://lz4.overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 const OSRM = 'https://router.project-osrm.org/route/v1/driving/';
 const STOP_Q = `[out:json][timeout:25];(node["highway"="bus_stop"](${BBOX});nwr["amenity"="bus_station"](${BBOX});nwr["public_transport"~"^(platform|station)$"]["bus"="yes"](${BBOX});nwr["railway"~"^(station|halt)$"](${BBOX});node["amenity"="taxi"](${BBOX}););out tags center;`;
 
@@ -71,7 +71,7 @@ map.on('click', () => { if (innerWidth <= 760) { document.body.classList.add('cl
 map.on('mousemove', e => { $('#coords').textContent = `Lat ${e.latlng.lat.toFixed(5)}   Lon ${e.latlng.lng.toFixed(5)}   Zoom ${map.getZoom()}`; });
 
 /* ---------- Public APIs ---------- */
-async function race(query, ms) {
+async function race(query, ms, valid) {
   const ctls = [], errors = [];
   const attempts = ENDPOINTS.map(async url => {
     const ctl = new AbortController(); ctls.push(ctl);
@@ -82,6 +82,7 @@ async function race(query, ms) {
       const json = await res.json();
       if (!Array.isArray(json.elements)) throw new Error('unexpected response');
       if (json.remark && /error|timed out|memory/i.test(json.remark)) throw new Error('incomplete answer');
+      if (valid && !valid(json)) throw new Error('empty or partial answer');
       return json;
     } catch (e) { errors.push(host + ' (' + (e.name === 'AbortError' ? 'no answer' : e.message) + ')'); throw e; }
     finally { clearTimeout(timer); }
@@ -89,18 +90,20 @@ async function race(query, ms) {
   try { const json = await Promise.any(attempts); ctls.forEach(c => c.abort()); return json; }
   catch { console.error('Overpass failures:', errors); throw new Error('the public servers are busy: ' + errors.join(', ')); }
 }
-async function overpass(query, ms = 40000, tries = 3, onTry) {
+async function overpass(query, ms = 40000, tries = 3, onTry, valid) {
   let err;
   for (let i = 1; i <= tries; i++) {
     onTry && onTry(i, tries);
-    try { return await race(query, ms); } catch (e) { err = e; if (i < tries) await sleep(1500); }
+    try { return await race(query, ms, valid); } catch (e) { err = e; if (i < tries) await sleep(1500); }
   }
   throw err;
 }
 
 function classify(t) {
-  const metro = /metro/i.test((t.name || '') + (t.network || '') + (t.operator || ''));
-  if (t.railway) return 'rail';
+  const metro = /metro/i.test((t.name || '') + (t.network || '') + (t.operator || ''))
+    || t.trolleybus === 'yes'   // Metrobus platforms are tagged this way
+    || (t.public_transport === 'platform' && /\sStation$/i.test(t.name || '') && /^\d+$/.test(t.ref || ''));   // numbered Metrobus stations such as Saddar Station (24)
+  if (t.railway && !/metro bus/i.test(t.name || '')) return 'rail';
   if (t.amenity === 'taxi') return 'taxi';
   if (t.amenity === 'bus_station' || (t.public_transport === 'station' && t.bus === 'yes')) return metro ? 'metro' : 'bus_station';
   return metro ? 'metro' : 'bus_stop';
@@ -111,12 +114,13 @@ function cityOf(t, lat, lon) {   // approximate: address tag first, then a divid
   if (a.includes('islamabad')) return 'isb';
   return lat < 33.652 - (lon - 73.0) * 0.371 ? 'rwp' : 'isb';
 }
-function ingest(data, t) {
+function ingest(data, t, kind) {
   state.all = data.elements.map(e => {
     const tg = e.tags || {}, lat = e.lat ?? e.center?.lat, lon = e.lon ?? e.center?.lon;
     return { id: e.type + '/' + e.id, lat, lon, tags: tg, name: tg.name || tg['name:en'] || '', cat: classify(tg), city: cityOf(tg, lat, lon) };
   }).filter(f => f.lat != null);
-  $('#src').textContent = 'Loaded ' + new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) + '.';
+  state.kind = kind === 'live' ? 'live' : 'saved';
+  $('#src').textContent = (state.kind === 'live' ? 'Fetched live from the Overpass API: ' : 'Saved copy from ') + new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) + '.';
   state.raw = { t, d: data };
   render(); updateDQ();
 }
@@ -129,28 +133,28 @@ function snapshot(t, d, name = 'stops.json', force = false) {   // visit the sit
   a.download = name; a.click();
 }
 async function fetchLive(tries, onTry) {
-  const d = await overpass(STOP_Q, 25000, tries, onTry);
+  const d = await overpass(STOP_Q, 25000, tries, onTry, x => x.elements.length > 50);
   if (!d.elements.length) throw new Error('the service returned no features for this area');
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), d })); } catch {}
   return d;
 }
 async function loadStops() {
   hideToast();
-  let c = readCache();
-  if (!c) { try { const r = await fetch('stops.json'); if (r.ok) { const j = await r.json(); if (j && j.d && j.d.elements) c = j; } } catch {} }
-  if (c) {   // show saved data instantly, then refresh quietly if it is older than a day
-    ingest(c.d, c.t); snapshot(c.t, c.d); $('#loader').classList.add('done');
-    if (Date.now() - c.t > 864e5) {
-      const s = $('#src'); s.textContent += ' Refreshing live data…';
-      try { const d = await fetchLive(2); ingest(d, Date.now()); snapshot(Date.now(), d); }
-      catch (e) { console.warn('Background refresh failed:', e.message); s.textContent = s.textContent.replace(' Refreshing live data…', ''); }
-    }
+  let c = readCache(), fromFile = false;
+  if (!c) { try { const r = await fetch('stops.json'); if (r.ok) { const j = await r.json(); if (j && j.d && j.d.elements) { c = j; fromFile = true; } } } catch {} }
+  if (c) {   // show the saved copy instantly, then ask the live API in the background
+    ingest(c.d, c.t, 'saved'); snapshot(c.t, c.d); $('#loader').classList.add('done');
+    if (!fromFile && Date.now() - c.t < 3e5) return;   // browser copy fetched live in the last 5 minutes
+    pill('Checking the live API…');
+    try { const d = await fetchLive(2); ingest(d, Date.now(), 'live'); snapshot(Date.now(), d); }
+    catch (e) { console.warn('Live refresh failed:', e.message); showToast('The live servers are busy, so you are viewing the saved copy from ' + new Date(c.t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) + '.', null, true); }
+    pill();
     return;
   }
   $('#loader').classList.remove('done');
   try {
     const d = await fetchLive(3, (i, n) => { $('#loader-msg').textContent = `Loading stops from OpenStreetMap (attempt ${i} of ${n}). You can use the map meanwhile.`; });
-    ingest(d, Date.now()); snapshot(Date.now(), d);
+    ingest(d, Date.now(), 'live'); snapshot(Date.now(), d);
   } catch (e) { showToast('Could not load transport data: ' + e.message + '.', loadStops); }
   $('#loader').classList.add('done');
 }
@@ -369,7 +373,7 @@ async function refreshAll() {
   const before = new Set(state.all.map(f => f.id));
   try {
     const d = await fetchLive(2);
-    ingest(d, Date.now());
+    ingest(d, Date.now(), 'live');
     const now = new Set(state.all.map(f => f.id));
     const added = [...now].filter(i => !before.has(i)).length, removed = [...before].filter(i => !now.has(i)).length;
     showToast(added || removed ? `Updated: ${state.all.length} stops (${added} new, ${removed} removed).` : `Already up to date: ${state.all.length} stops.`, null, true);
@@ -420,7 +424,7 @@ function updateDQ() {
   const amen = a.filter(f => ['shelter', 'bench', 'bin', 'lit', 'wheelchair', 'opening_hours'].some(k => f.tags[k])).length;
   const op = a.filter(f => f.tags.operator || f.tags.network).length, nm = a.filter(f => f.name);
   let dup = 0; for (let i = 0; i < nm.length; i++) for (let k = i + 1; k < nm.length; k++) if (nm[i].name === nm[k].name && Math.abs(nm[i].lat - nm[k].lat) < .0004 && dist(nm[i], nm[k]) < 30) dup++;
-  $('#dq').innerHTML = `<div>Features loaded <b>${n}</b></div><div>With a name <b>${named} (${pct(named)})</b></div><div>Without a name <b>${n - named}</b></div><div>With amenity details <b>${amen} (${pct(amen)})</b></div><div>With operator or network <b>${op}</b></div><div>Possible duplicate pairs <b>${dup}</b></div>`;
+  $('#dq').innerHTML = `<div>Data source <b>${state.kind === 'live' ? 'Live API' : 'Saved copy'}</b></div><div>Features loaded <b>${n}</b></div><div>With a name <b>${named} (${pct(named)})</b></div><div>Without a name <b>${n - named}</b></div><div>With amenity details <b>${amen} (${pct(amen)})</b></div><div>With operator or network <b>${op}</b></div><div>Possible duplicate pairs <b>${dup}</b></div>`;
   $('#dq-link').href = 'https://overpass-turbo.eu/?Q=' + encodeURIComponent(STOP_Q.replace('out tags center;', 'out count;')) + '&R';
 }
 $('#dl').addEventListener('click', () => state.raw ? snapshot(state.raw.t, state.raw.d, 'stops.json', true) : showToast('No data has loaded yet.'));
