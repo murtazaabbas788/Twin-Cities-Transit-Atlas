@@ -24,6 +24,7 @@
     <button id="near" type="button">Near me</button>
     <ul id="sug" role="listbox" hidden></ul>
   </div>
+  <button id="refresh" aria-label="Refresh data from OpenStreetMap" title="Refresh data"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg></button>
   <div class="clock" aria-label="Current date and time in Pakistan"><b id="time">--:--:--</b><small id="date"></small></div>
 </header>
 
@@ -34,12 +35,26 @@
       <div class="body">
         <details class="sec" open><summary>Area</summary><div id="cities"></div></details>
         <details class="sec" open><summary>Stop types</summary><div id="cats"></div></details>
+        <details class="sec"><summary>Buffer: stops near a point</summary>
+          <div class="btnrow"><button id="b-pick" type="button">Pick a point</button><button id="b-me" type="button">My location</button></div>
+          <label class="fld">Distance from that point
+            <select id="b-rad"><option value="500">Within 500 m</option><option value="1000" selected>Within 1 km</option><option value="2000">Within 2 km</option><option value="5000">Within 5 km</option><option value="10000">Within 10 km</option></select></label>
+          <label class="opt"><input type="checkbox" id="b-only"><span class="box" style="--c:#0b1f3a"></span><span class="lbl">Show only stops inside</span></label>
+          <div id="b-out" class="bout"></div>
+          <button id="b-clear" type="button" class="linkbtn" hidden>Clear buffer</button>
+        </details>
         <details class="sec" open><summary>Bus routes</summary>
           <label class="opt"><input type="checkbox" id="r-metro"><span class="box" style="--c:#0b1f3a"></span><span class="lbl">Metrobus line</span><em>quick</em></label>
           <label class="opt"><input type="checkbox" id="r-all"><span class="box" style="--c:#0b1f3a"></span><span class="lbl">All bus routes</span><em>slower</em></label>
         </details>
         <details class="sec" open><summary>Basemap</summary>
           <div class="seg" id="base"><button data-b="osm" class="on">Streets</button><button data-b="sat">Satellite</button><button data-b="topo">Terrain</button></div>
+        </details>
+        <details class="sec"><summary>Data check</summary>
+          <div id="dq" class="dq"></div>
+          <p class="dqn">These numbers describe what OpenStreetMap contains for the study area.</p>
+          <a id="dq-link" class="linkbtn" target="_blank" rel="noopener">Verify the count on Overpass Turbo</a>
+          <button id="dl" type="button" class="linkbtn">Download data copy (stops.json)</button>
         </details>
         <div class="about">
           <p><b>Study area:</b> Islamabad and Rawalpindi, Pakistan. <b>Data:</b> OpenStreetMap, fetched live from the Overpass API.</p>
@@ -64,7 +79,7 @@
 
 <footer id="foot">
   <span class="cr"><a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a> | © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors<span id="credit-extra"></span></span>
-  <span class="by">@SheikhMurtazabinAbbas</span>
+  <span class="by">SheikhMurtazabinAbbas</span>
   <span id="coords" aria-hidden="true"></span>
 </footer>
 

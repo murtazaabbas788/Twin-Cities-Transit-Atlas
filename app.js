@@ -1,10 +1,10 @@
 'use strict';
-const CACHE_KEY = 'tcta-stops-v1';
+const CACHE_KEY = 'tcta-stops-v2';
 const BBOX = '33.45,72.80,33.80,73.25';
 /* Free public Overpass instances (no key needed). All are queried at once and the first answer wins. */
 const ENDPOINTS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', 'https://overpass.openstreetmap.fr/api/interpreter'];
 const OSRM = 'https://router.project-osrm.org/route/v1/driving/';
-const STOP_Q = `[out:json][timeout:30];(node["highway"="bus_stop"](${BBOX});nwr["amenity"="bus_station"](${BBOX});nwr["railway"~"^(station|halt)$"](${BBOX});node["amenity"="taxi"](${BBOX}););out tags center;`;
+const STOP_Q = `[out:json][timeout:25];(node["highway"="bus_stop"](${BBOX});nwr["amenity"="bus_station"](${BBOX});nwr["public_transport"~"^(platform|station)$"]["bus"="yes"](${BBOX});nwr["railway"~"^(station|halt)$"](${BBOX});node["amenity"="taxi"](${BBOX}););out tags center;`;
 
 /* Vehicle glyphs (24x24 line icons) */
 const G = {
@@ -28,8 +28,8 @@ const BASES = {
   topo: ['https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { maxZoom: 17, attribution: '© OpenStreetMap contributors, © OpenTopoMap (CC-BY-SA)' }]
 };
 const ROUTES = {
-  metro: { ms: 60, msg: 'Loading Metrobus lines…', q: `relation["route"~"^(bus|trolleybus)$"][~"^(name|network|operator)$"~"Metro",i](${BBOX});out geom qt;` },
-  all:   { ms: 90, msg: 'Loading all bus routes, this can take a minute…', q: `relation["route"="bus"](${BBOX});out geom qt;` }
+  metro: { ms: 60, msg: 'Loading Metrobus lines…', q: `relation["route"~"^(bus|trolleybus)$"][~"^(name|network|operator)$"~"Metro",i](${BBOX});out geom(${BBOX}) qt;` },
+  all:   { ms: 90, msg: 'Loading all bus routes, this can take a minute…', q: `relation["route"="bus"](${BBOX});out geom(${BBOX}) qt;` }
 };
 
 const $ = s => document.querySelector(s);
@@ -41,6 +41,7 @@ const svg = (g, s) => `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill=
 const badge = (k, s = CATS[k].size) => `<span class="bdg ${CATS[k].sq ? 'sq' : ''}" style="--c:${CATS[k].color};width:${s}px;height:${s}px">${svg(CATS[k].g, Math.round(s * .58))}</span>`;
 const state = { all: [], cats: new Set(Object.keys(CATS)), cities: new Set(Object.keys(CITIES)) };
 const markers = new Map(), icons = {};
+const buf = { c: null, r: 1000, circle: null, marker: null, pick: false, only: false };
 let me = null, meMarker = null, pulse = null, routeLine = null;
 
 $('#logo').innerHTML = svg('bus', 26).replace('#fff', '#0b1f3a');
@@ -80,6 +81,7 @@ async function race(query, ms) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json = await res.json();
       if (!Array.isArray(json.elements)) throw new Error('unexpected response');
+      if (json.remark && /error|timed out|memory/i.test(json.remark)) throw new Error('incomplete answer');
       return json;
     } catch (e) { errors.push(host + ' (' + (e.name === 'AbortError' ? 'no answer' : e.message) + ')'); throw e; }
     finally { clearTimeout(timer); }
@@ -91,7 +93,7 @@ async function overpass(query, ms = 40000, tries = 3, onTry) {
   let err;
   for (let i = 1; i <= tries; i++) {
     onTry && onTry(i, tries);
-    try { return await race(query, ms); } catch (e) { err = e; if (i < tries) await sleep(2500); }
+    try { return await race(query, ms); } catch (e) { err = e; if (i < tries) await sleep(1500); }
   }
   throw err;
 }
@@ -100,7 +102,7 @@ function classify(t) {
   const metro = /metro/i.test((t.name || '') + (t.network || '') + (t.operator || ''));
   if (t.railway) return 'rail';
   if (t.amenity === 'taxi') return 'taxi';
-  if (t.amenity === 'bus_station') return metro ? 'metro' : 'bus_station';
+  if (t.amenity === 'bus_station' || (t.public_transport === 'station' && t.bus === 'yes')) return metro ? 'metro' : 'bus_station';
   return metro ? 'metro' : 'bus_stop';
 }
 function cityOf(t, lat, lon) {   // approximate: address tag first, then a dividing line between the cities
@@ -115,33 +117,61 @@ function ingest(data, t) {
     return { id: e.type + '/' + e.id, lat, lon, tags: tg, name: tg.name || tg['name:en'] || '', cat: classify(tg), city: cityOf(tg, lat, lon) };
   }).filter(f => f.lat != null);
   $('#src').textContent = 'Loaded ' + new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) + '.';
-  render();
+  state.raw = { t, d: data };
+  render(); updateDQ();
 }
 const readCache = () => { try { const c = JSON.parse(localStorage.getItem(CACHE_KEY)); return c && c.d && c.d.elements ? c : null; } catch { return null; } };
 
+function snapshot(t, d, name = 'stops.json', force = false) {   // visit the site with ?snapshot to download the data files
+  if (!force && !/[?&]snapshot/.test(location.search)) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify({ t, d })], { type: 'application/json' }));
+  a.download = name; a.click();
+}
+async function fetchLive(tries, onTry) {
+  const d = await overpass(STOP_Q, 25000, tries, onTry);
+  if (!d.elements.length) throw new Error('the service returned no features for this area');
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), d })); } catch {}
+  return d;
+}
 async function loadStops() {
   hideToast();
-  const c = readCache();
-  if (c) { ingest(c.d, c.t); $('#loader').classList.add('done'); if (Date.now() - c.t < 864e5) return; }
-  else $('#loader').classList.remove('done');
-  try {
-    const d = await overpass(STOP_Q, 40000, 3, (i, n) => { $('#loader-msg').textContent = `Contacting OpenStreetMap servers (attempt ${i} of ${n})…`; });
-    if (!d.elements.length) throw new Error('the service returned no features for this area');
-    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), d })); } catch {}
-    ingest(d, Date.now());
-  } catch (e) {
-    c ? showToast('The live servers are busy, so you are viewing the copy saved on this device.', null, true) : showToast('Could not load transport data: ' + e.message + '.', loadStops);
+  let c = readCache();
+  if (!c) { try { const r = await fetch('stops.json'); if (r.ok) { const j = await r.json(); if (j && j.d && j.d.elements) c = j; } } catch {} }
+  if (c) {   // show saved data instantly, then refresh quietly if it is older than a day
+    ingest(c.d, c.t); snapshot(c.t, c.d); $('#loader').classList.add('done');
+    if (Date.now() - c.t > 864e5) {
+      const s = $('#src'); s.textContent += ' Refreshing live data…';
+      try { const d = await fetchLive(2); ingest(d, Date.now()); snapshot(Date.now(), d); }
+      catch (e) { console.warn('Background refresh failed:', e.message); s.textContent = s.textContent.replace(' Refreshing live data…', ''); }
+    }
+    return;
   }
+  $('#loader').classList.remove('done');
+  try {
+    const d = await fetchLive(3, (i, n) => { $('#loader-msg').textContent = `Loading stops from OpenStreetMap (attempt ${i} of ${n}). You can use the map meanwhile.`; });
+    ingest(d, Date.now()); snapshot(Date.now(), d);
+  } catch (e) { showToast('Could not load transport data: ' + e.message + '.', loadStops); }
   $('#loader').classList.add('done');
 }
 
-async function toggleRoute(kind, input) {
+async function getRouteData(kind, cfg, force) {   // saved copy in the browser, then routes-<kind>.json in the repo, then the live API
+  const key = 'tcta-routes-' + kind, file = `routes-${kind}.json`;
+  if (!force) try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.d && c.d.elements && Date.now() - c.t < 7 * 864e5) { snapshot(c.t, c.d, file); return c.d; } } catch {}
+  if (!force) try { const r = await fetch(file); if (r.ok) { const s = await r.json(); if (s && s.d && s.d.elements) { snapshot(s.t, s.d, file); return s.d; } } } catch {}
+  const d = await overpass(`[out:json][timeout:${cfg.ms}];` + cfg.q, cfg.ms * 1000, 3, (i, n) => pill(cfg.msg + (i > 1 ? ` (retry ${i - 1} of ${n - 1})` : '')));
+  try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), d })); } catch {}
+  snapshot(Date.now(), d, file);
+  return d;
+}
+
+async function toggleRoute(kind, input, force) {
   const g = rl[kind];
   if (!input.checked) return map.removeLayer(g);
   if (rloaded[kind]) return g.addTo(map);
   const cfg = ROUTES[kind];
   try {
-    const data = await overpass(`[out:json][timeout:${cfg.ms}];` + cfg.q, cfg.ms * 1000, 2, (i, n) => pill(cfg.msg + (i > 1 ? ` (retry ${i - 1})` : '')));
+    const data = await getRouteData(kind, cfg, force);
     data.elements.forEach(rel => {
       const t = rel.tags || {}, label = [t.ref, t.name].filter(Boolean).join(' ') || 'Bus route', w = kind === 'metro' ? 5 : 3;
       const color = kind === 'metro' ? '#dc2626' : (t.colour || `hsl(${[...label].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 7) % 360} 65% 42%)`);
@@ -181,9 +211,15 @@ function locate() {
 }
 
 /* ---------- Rendering ---------- */
-const visible = () => state.all.filter(f => state.cats.has(f.cat) && state.cities.has(f.city));
+const visible = () => state.all.filter(f => state.cats.has(f.cat) && state.cities.has(f.city) && (!buf.only || !buf.c || dist(buf.c, f) <= buf.r));
 const icon = c => icons[c] ||= L.divIcon({ className: '', html: `<span class="pin">${badge(c)}</span>`, iconSize: [CATS[c].size, CATS[c].size], iconAnchor: [CATS[c].size / 2, CATS[c].size / 2] });
 
+function buildOpts() {
+  const row = (k, label, extra = '') => `<label class="opt"><input type="checkbox" data-k="${k}" checked><span class="box" style="--c:#0b1f3a"></span>${extra}<span class="lbl">${label}</span><em data-count="${k}">0</em></label>`;
+  $('#cities').innerHTML = Object.entries(CITIES).map(([k, c]) => row(k, c.label)).join('');
+  $('#cats').innerHTML = Object.entries(CATS).map(([k, c]) => row(k, c.label, badge(k, 22))).join('');
+  $('#legend').innerHTML = '<h3>Legend</h3>' + Object.entries(CATS).map(([k, c]) => `<div>${badge(k, 24)}${c.label}</div>`).join('') + '<div><span class="ln"></span>Metrobus line</div>';
+}
 function render() {
   const list = visible();
   cluster.clearLayers(); markers.clear();
@@ -194,14 +230,13 @@ function render() {
   }));
   const cnt = (key, other, set) => state.all.reduce((o, f) => (set.has(f[other]) && (o[f[key]] = (o[f[key]] || 0) + 1), o), {});
   const byCat = cnt('cat', 'city', state.cities), byCity = cnt('city', 'cat', state.cats);
-  const row = (k, label, color, n, on, extra = '') => `<label class="opt"><input type="checkbox" data-k="${k}" ${on ? 'checked' : ''}><span class="box" style="--c:${color}"></span>${extra}<span class="lbl">${label}</span><em>${(n || 0).toLocaleString()}</em></label>`;
-  $('#cities').innerHTML = Object.entries(CITIES).map(([k, c]) => row(k, c.label, '#0b1f3a', byCity[k], state.cities.has(k))).join('');
-  $('#cats').innerHTML = Object.entries(CATS).map(([k, c]) => row(k, c.label, '#0b1f3a', byCat[k], state.cats.has(k), badge(k, 22))).join('');
-  $('#legend').innerHTML = '<h3>Legend</h3>' + Object.entries(CATS).map(([k, c]) => `<div>${badge(k, 24)}${c.label}</div>`).join('') + '<div><span class="ln"></span>Metrobus line</div>';
+  document.querySelectorAll('[data-count]').forEach(el => { el.textContent = ((el.dataset.count in CITIES ? byCity : byCat)[el.dataset.count] || 0).toLocaleString(); });
+  document.querySelectorAll('input[data-k]').forEach(i => { const on = (i.dataset.k in CITIES ? state.cities : state.cats).has(i.dataset.k); if (i.checked !== on) i.checked = on; });
   const tot = c => state.all.filter(f => f.city === c).length;
   $('#k-total').textContent = state.all.length.toLocaleString(); $('#k-isb').textContent = tot('isb').toLocaleString(); $('#k-rwp').textContent = tot('rwp').toLocaleString();
+  updateBuffer();
 }
-render();
+buildOpts(); render();
 
 function fitVisible() {
   const l = visible(); if (!l.length) return showToast('Nothing to show. Turn on at least one area and one stop type.', null, true);
@@ -231,7 +266,7 @@ function showInfo(f) {
   <dl>${rows}<dt>Coordinates</dt><dd>${f.lat.toFixed(5)}, ${f.lon.toFixed(5)}</dd></dl>
   ${rows ? '' : '<p class="hint">No extra details are mapped for this feature yet. Anyone can add them on OpenStreetMap.</p>'}
   <div class="acts"><button data-a="zoom">Zoom to stop</button><button data-a="copy">Copy coordinates</button>
-  <a href="https://www.openstreetmap.org/directions?route=%3B${f.lat}%2C${f.lon}" target="_blank" rel="noopener">Get directions</a>
+  <a href="https://www.google.com/maps/dir/?api=1&destination=${f.lat},${f.lon}&travelmode=driving" target="_blank" rel="noopener">Get directions</a>
   <a href="https://www.openstreetmap.org/${f.id}" target="_blank" rel="noopener">View on OSM</a></div>
   <h3>Nearest stops</h3><ul class="near">${near.map(({ x, d }) => `<li><button data-id="${x.id}">${badge(x.cat, 24)}${esc(x.name || CATS[x.cat].label)}<small>${fmt(d)}</small></button></li>`).join('')}</ul></div>`;
   el.scrollTop = 0; fillDistance(f);
@@ -307,7 +342,7 @@ $('.body').addEventListener('change', e => {
   const k = e.target.dataset.k; if (!k) return;
   const set = k in CITIES ? state.cities : state.cats;
   e.target.checked ? set.add(k) : set.delete(k);
-  render(); if (k in CITIES) fitVisible();
+  setTimeout(() => { render(); if (k in CITIES) fitVisible(); }, 0);
 });
 $('#base').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; document.querySelectorAll('#base button').forEach(x => x.classList.toggle('on', x === b)); setBase(b.dataset.b); });
 $('#r-metro').addEventListener('change', e => toggleRoute('metro', e.target));
@@ -325,5 +360,69 @@ function showToast(msg, retry, info) {
   t.querySelector('button').onclick = () => { hideToast(); retry && retry(); };
   clearTimeout(toastTimer); if (info) toastTimer = setTimeout(hideToast, 7000);
 }
+
+/* ---------- Refresh ---------- */
+let refreshing = false;
+async function refreshAll() {
+  if (refreshing) return; refreshing = true;
+  const btn = $('#refresh'); btn.classList.add('spin-on'); pill('Refreshing from OpenStreetMap…');
+  const before = new Set(state.all.map(f => f.id));
+  try {
+    const d = await fetchLive(2);
+    ingest(d, Date.now());
+    const now = new Set(state.all.map(f => f.id));
+    const added = [...now].filter(i => !before.has(i)).length, removed = [...before].filter(i => !now.has(i)).length;
+    showToast(added || removed ? `Updated: ${state.all.length} stops (${added} new, ${removed} removed).` : `Already up to date: ${state.all.length} stops.`, null, true);
+    for (const [kind, id] of [['metro', '#r-metro'], ['all', '#r-all']]) {
+      rloaded[kind] = false; rl[kind].clearLayers(); try { localStorage.removeItem('tcta-routes-' + kind); } catch {}
+      if ($(id).checked) await toggleRoute(kind, $(id), true);
+    }
+  } catch (e) { showToast('Could not refresh: ' + e.message + '. You are still seeing the previous data.'); }
+  pill(); btn.classList.remove('spin-on'); refreshing = false;
+}
+$('#refresh').addEventListener('click', refreshAll);
+
+/* ---------- Buffer: count stops around a point ---------- */
+function updateBuffer() {
+  const out = $('#b-out'); if (!out) return;
+  if (!buf.c) { out.textContent = 'Pick a point on the map, or use your location, to count the stops around it.'; $('#b-clear').hidden = true; return; }
+  const inside = state.all.filter(f => state.cats.has(f.cat) && state.cities.has(f.city) && dist(buf.c, f) <= buf.r);
+  const by = {}; inside.forEach(f => by[f.cat] = (by[f.cat] || 0) + 1);
+  const near = inside.length ? inside.reduce((a, b) => dist(buf.c, a) <= dist(buf.c, b) ? a : b) : null;
+  out.innerHTML = `<b>${inside.length}</b> stop${inside.length === 1 ? '' : 's'} within ${buf.r < 1000 ? buf.r + ' m' : buf.r / 1000 + ' km'}`
+    + Object.entries(CATS).filter(([k]) => by[k]).map(([k, c]) => `<div class="brow">${badge(k, 20)}<span>${c.label}</span><em>${by[k]}</em></div>`).join('')
+    + (near ? `<small>Nearest: ${esc(near.name || CATS[near.cat].label)}, ${fmt(dist(buf.c, near))} away</small>` : '<small>No stops of the ticked types are inside this circle.</small>');
+  $('#b-clear').hidden = false;
+}
+function setBuffer(ll) {
+  buf.c = { lat: ll.lat, lon: ll.lng ?? ll.lon };
+  if (!buf.circle) {
+    buf.circle = L.circle([buf.c.lat, buf.c.lon], { radius: buf.r, color: '#f5b301', weight: 2, fillColor: '#f5b301', fillOpacity: .14, interactive: false }).addTo(map);
+    buf.marker = L.marker([buf.c.lat, buf.c.lon], { draggable: true, zIndexOffset: 900, icon: L.divIcon({ className: '', html: '<span class="bpin"></span>', iconSize: [22, 22], iconAnchor: [11, 11] }) }).addTo(map)
+      .bindTooltip('Drag me', { direction: 'top', offset: [0, -10] })
+      .on('drag', e => { const p = e.target.getLatLng(); buf.c = { lat: p.lat, lon: p.lng }; buf.circle.setLatLng(p); updateBuffer(); })
+      .on('dragend', () => { if (buf.only) render(); });
+  } else { buf.circle.setLatLng([buf.c.lat, buf.c.lon]); buf.marker.setLatLng([buf.c.lat, buf.c.lon]); }
+  map.flyToBounds(buf.circle.getBounds().pad(.15), { duration: .7 });
+  render();
+}
+map.on('click', e => { if (!buf.pick) return; buf.pick = false; map.getContainer().style.cursor = ''; setBuffer(e.latlng); });
+$('#b-pick').addEventListener('click', () => { buf.pick = true; map.getContainer().style.cursor = 'crosshair'; if (innerWidth <= 760) document.body.classList.add('closed'); showToast('Click anywhere on the map to place the buffer centre.', null, true); });
+$('#b-me').addEventListener('click', () => locate().then(p => setBuffer({ lat: p.lat, lng: p.lon })).catch(e => showToast(e.message)));
+$('#b-rad').addEventListener('change', e => { buf.r = +e.target.value; if (buf.circle) { buf.circle.setRadius(buf.r); map.flyToBounds(buf.circle.getBounds().pad(.15), { duration: .6 }); } render(); });
+$('#b-only').addEventListener('change', e => { buf.only = e.target.checked; render(); });
+$('#b-clear').addEventListener('click', () => { [buf.circle, buf.marker].forEach(l => l && map.removeLayer(l)); buf.c = buf.circle = buf.marker = null; buf.pick = false; render(); });
+
+/* ---------- Data check ---------- */
+function updateDQ() {
+  const a = state.all, n = a.length, pct = x => n ? Math.round(100 * x / n) + '%' : '0%';
+  const named = a.filter(f => f.name).length;
+  const amen = a.filter(f => ['shelter', 'bench', 'bin', 'lit', 'wheelchair', 'opening_hours'].some(k => f.tags[k])).length;
+  const op = a.filter(f => f.tags.operator || f.tags.network).length, nm = a.filter(f => f.name);
+  let dup = 0; for (let i = 0; i < nm.length; i++) for (let k = i + 1; k < nm.length; k++) if (nm[i].name === nm[k].name && Math.abs(nm[i].lat - nm[k].lat) < .0004 && dist(nm[i], nm[k]) < 30) dup++;
+  $('#dq').innerHTML = `<div>Features loaded <b>${n}</b></div><div>With a name <b>${named} (${pct(named)})</b></div><div>Without a name <b>${n - named}</b></div><div>With amenity details <b>${amen} (${pct(amen)})</b></div><div>With operator or network <b>${op}</b></div><div>Possible duplicate pairs <b>${dup}</b></div>`;
+  $('#dq-link').href = 'https://overpass-turbo.eu/?Q=' + encodeURIComponent(STOP_Q.replace('out tags center;', 'out count;')) + '&R';
+}
+$('#dl').addEventListener('click', () => state.raw ? snapshot(state.raw.t, state.raw.d, 'stops.json', true) : showToast('No data has loaded yet.'));
 
 loadStops();
